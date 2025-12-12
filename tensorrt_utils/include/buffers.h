@@ -235,8 +235,8 @@ public:
 };
 /*--------------------------------------------*/
 using DeviceBuffer = GenericBuffer<DeviceAllocator, DeviceFree>;
-// using HostBuffer = GenericBuffer<PinnedAllocator, PinnedFree>;
-using HostBuffer = GenericBuffer<HostAllocator, HostFree>;
+using HostBuffer = GenericBuffer<PinnedAllocator, PinnedFree>;
+// using HostBuffer = GenericBuffer<HostAllocator, HostFree>;
 
 //!
 //! \brief  The ManagedBuffer class groups together a pair of corresponding device and host buffers.

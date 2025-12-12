@@ -1,0 +1,1 @@
+sudo docker pull canyueduxuan/tensorrt:22.12_ros_opencv

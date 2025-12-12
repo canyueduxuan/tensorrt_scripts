@@ -1,152 +1,67 @@
 #include "lightstereo.hpp"
-Lightstereo::Lightstereo(const std::string& onnx_path,const std::string& engine_path) {
-    initLibNvInferPlugins(&sample::gLogger, "");
-    this->onnx_path_ = onnx_path;
-    this->engine_path_ = engine_path;
-    if(access(engine_path.c_str(), F_OK) == 0)
+#include "opencv2/opencv.hpp"
+int Lightstereo::doInference(void *input,void *output)
+{
+    cv::Mat* input_mat = static_cast<cv::Mat*>(input);
+    cv::Mat* output_mat = static_cast<cv::Mat*>(output);
+    //process input
+    for (int i = 0;i < this->stream_number_;i++)
     {
-        std::cout << "engine file find" << std::endl;
-        if(deserializeEngine() != 0)
+        cv::Mat left = input_mat[2 * i];
+        cv::Mat right = input_mat[2 * i + 1];
+        cv::resize(left, left, cv::Size(this->bindingDims[0].d[3], this->bindingDims[0].d[2]));
+        cv::resize(right, right, cv::Size(this->bindingDims[1].d[3], this->bindingDims[1].d[2]));
+        cv::cvtColor(left, left, cv::COLOR_BGR2RGB);
+        cv::cvtColor(right, right, cv::COLOR_BGR2RGB);
+        left.convertTo(left, CV_32F, 1.0 / 255.0); // 转换为浮动型并归一化
+        right.convertTo(right, CV_32F, 1.0 / 255.0);
+        float* hostDataBuffer1 = static_cast<float*>(this->buffer_managers_[i]->getHostBuffer("left_img"));
+        float* hostDataBuffer2 = static_cast<float*>(this->buffer_managers_[i]->getHostBuffer("right_img"));
+        int channelSize = this->bindingDims[0].d[3] * this->bindingDims[0].d[2];
+        std::vector<cv::Mat> leftChannels(3), rightChannels(3);
+        cv::split(left, leftChannels);
+        cv::split(right, rightChannels);
+
+        // 左图
+        for (int c = 0; c < 3; c++)
         {
-            std::cout << "deserialize engine file failed" << std::endl;
+            memcpy(
+                hostDataBuffer1 + c * channelSize,
+                leftChannels[c].ptr<float>(0),
+                channelSize * sizeof(float)
+            );
+        }
+
+        // 右图
+        for (int c = 0; c < 3; c++)
+        {
+            memcpy(
+                hostDataBuffer2 + c * channelSize,
+                rightChannels[c].ptr<float>(0),
+                channelSize * sizeof(float)
+            );
+        }
+        this->buffer_managers_[i]->copyInputToDeviceAsync(this->streams_[i]);
+    }
+    //do inference
+    for (int i = 0;i < this->stream_number_;i++)
+    {
+        bool status = this->contexts_[i]->enqueueV2(this->buffer_managers_[i]->getDeviceBindings().data(), this->streams_[i], nullptr);
+        if (!status)
+        {
+            std::cerr << "Failed to enqueue the inference." << std::endl;
             std::exit(0);
         }
     }
-    else
+    //copy output to host
+    for (int i = 0;i < this->stream_number_;i++)
     {
-        std::cout << "engine file not find,build engine file from onnx" << std::endl;
-        if (access(onnx_path.c_str(), F_OK) == 0) {
-            std::cout << "onnx file find" << std::endl;
-            if(buildEngine() != 0)
-            {
-                std::cout << "build engine file from onnx failed" << std::endl;
-                std::exit(0);
-            }
-        } else {
-            std::cout << "onnx file not find" << std::endl;
-            std::exit(0);
-        }
+        this->buffer_managers_[i]->copyOutputToHostAsync(this->streams_[i]);
     }
-    this->context = this->engine->createExecutionContext();
-    if(!this->context) {
-        std::cerr << "Failed to create execution context." << std::endl;
-        std::exit(0);
-    }
-    cudaStreamCreate(&this->stream_);
-    if(this->stream_ == nullptr)
+    //Synchronize and copy output
+    for (int i = 0;i < this->stream_number_;i++)
     {
-        std::cout << "cudaStreamCreate failed" << std::endl;
-        std::exit(0);
+        cudaStreamSynchronize(this->streams_[i]);
+        memcpy(output_mat[i].data, this->buffer_managers_[i]->getHostBuffer("disp_pred"), this->bindingDims[0].d[3] * this->bindingDims[0].d[2] * sizeof(float));
     }
-    std::shared_ptr<nvinfer1::ICudaEngine> enginePtr(this->engine);
-    this->buffer_manager = std::make_unique<samplesCommon::BufferManager>(enginePtr,0,this->context);
-}
-
-Lightstereo::~Lightstereo() {
-    // 1. 销毁执行上下文
-    if (this->context) {
-        this->context->destroy();  // 调用 TensorRT 的 destroy 方法来销毁上下文
-        this->context = nullptr;   // 将指针置空
-    }
-
-    // 2. 销毁 CUDA 流
-    if (this->stream_) {
-        cudaStreamDestroy(this->stream_);  // 使用 cudaStreamDestroy 销毁流
-    }
-
-    // 3. 释放 TensorRT 引擎
-    if (this->engine) {
-        this->engine->destroy();  // 调用 TensorRT 的 destroy 方法来销毁引擎
-        this->engine = nullptr;   // 将指针置空
-    }
-
-    // 4. 销毁 BufferManager
-    if (this->buffer_manager) {
-        this->buffer_manager.reset();  // 使用 reset 销毁 BufferManager
-    }
-}
-
-int Lightstereo::buildEngine() {
-    this->builder = nvinfer1::createInferBuilder(sample::gLogger);
-    if(!this->builder) {
-        std::cerr << "Failed to create TensorRT builder." << std::endl;
-        return -1;
-    }
-    this->network = this->builder->createNetworkV2(1U << (int) nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-    if(!this->network) {
-        std::cerr << "Failed to create TensorRT network." << std::endl;
-        return -2;
-    }
-    auto parser = nvonnxparser::createParser(*this->network, sample::gLogger);
-    if(!parser) {
-        std::cerr << "Failed to create ONNX parser." << std::endl;
-        return -3;
-    }
-    if(!parser->parseFromFile(this->onnx_path_.c_str(), 2)) {
-        std::cerr << "Failed to parse ONNX file." << std::endl;
-        return -4;
-    }
-    this->config = this->builder->createBuilderConfig();
-    if(!this->config) {
-        std::cerr << "Failed to create TensorRT builder config." << std::endl;
-        return -5;
-    }
-    auto profile = builder->createOptimizationProfile();
-    if (profile == nullptr){
-        std::cerr << "createOptimizationProfile failed" << std::endl;
-        return -6;
-    }
-    nvinfer1::Dims4 input_dims{1, 3, 256, 512};
-    profile->setDimensions("left_img", nvinfer1::OptProfileSelector::kMIN, input_dims);
-    profile->setDimensions("left_img", nvinfer1::OptProfileSelector::kOPT, input_dims);
-    profile->setDimensions("left_img", nvinfer1::OptProfileSelector::kMAX, input_dims);
-    profile->setDimensions("right_img", nvinfer1::OptProfileSelector::kMIN, input_dims);
-    profile->setDimensions("right_img", nvinfer1::OptProfileSelector::kOPT, input_dims);
-    profile->setDimensions("right_img", nvinfer1::OptProfileSelector::kMAX, input_dims);
-    this->config->addOptimizationProfile(profile);
-    this->config->setMaxWorkspaceSize(6ULL * 1024 * 1024 * 1024);
-    this->config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE,6ULL * 1024 * 1024 * 1024);
-    this->config->setFlag(nvinfer1::BuilderFlag::kFP16);
-    this->config->setFlag(nvinfer1::BuilderFlag::kSTRICT_TYPES);
-    this->engine = this->builder->buildEngineWithConfig(*this->network, *this->config);
-    if(!this->engine) {
-        std::cerr << "Failed to build TensorRT engine." << std::endl;
-        return -7;
-    }
-    std::ofstream engineFile(this->engine_path_, std::ios::binary);
-    if(!engineFile) {
-        std::cerr << "Failed to open engine file for writing." << std::endl;
-        return -8;
-    }
-    nvinfer1::IHostMemory* engineData = this->engine->serialize();
-    engineFile.write(static_cast<const char*>(engineData->data()), engineData->size());
-    engineFile.close();
-    engineData->destroy();
-    return 0;
-}
-
-int Lightstereo::deserializeEngine() {
-    std::ifstream engineFile(this->engine_path_, std::ios::binary);
-    if(!engineFile) {
-        std::cerr << "Failed to open engine file for reading." << std::endl;
-        return -1;
-    }
-    engineFile.seekg(0, std::ios::end);
-    size_t fsize = engineFile.tellg();
-    engineFile.seekg(0, std::ios::beg);
-    std::vector<char> engineData(fsize);
-    engineFile.read(engineData.data(), fsize);
-    engineFile.close();
-    nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(sample::gLogger);
-    if(!runtime) {
-        std::cerr << "Failed to create TensorRT runtime." << std::endl;
-        return -2;
-    }
-    this->engine = runtime->deserializeCudaEngine(engineData.data(), fsize, nullptr);
-    if(!this->engine) {
-        std::cerr << "Failed to deserialize TensorRT engine." << std::endl;
-        return -3;
-    }
-    runtime->destroy();
-    return 0;
 }

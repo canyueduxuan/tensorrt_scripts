@@ -1,0 +1,13 @@
+eval_models:
+  - name: "crestereo"
+    onnx_path: "/root/catkin_ws/models/crestereo_init_iter2_120x160.onnx"
+    engine_path: "/root/catkin_ws/models/crestereo.engine"
+
+  - name: "lightstereo"
+    onnx_path: "/root/catkin_ws/models/lightstereo_s_sceneflow_general_opt_256_512.onnx"
+    engine_path: "/root/catkin_ws/models/lightstereo_s_sceneflow_general_opt_256_512.engine"
+
+infer_number: 1000
+streams: 8
+left_img_path: "/root/catkin_ws/images/left_row_2.png"
+right_img_path: "/root/catkin_ws/images/right_row_2.png"

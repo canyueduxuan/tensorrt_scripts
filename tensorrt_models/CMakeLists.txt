@@ -7,6 +7,8 @@ file(GLOB TENSORRT_MODELS_SRC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
 
+find_package(OpenCV REQUIRED)
+
 add_library(tensorrt_models STATIC
     ${TENSORRT_MODELS_SRC}
 )
@@ -17,6 +19,7 @@ target_include_directories(tensorrt_models
 )
 
 target_link_libraries(${PROJECT_NAME}
+${OpenCV_LIBS}
 tensorrt_utils
 cudart
 )
